@@ -66,8 +66,10 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=logger.NOTE):
     bufsize = max(8, int((max_memory*.5e6/8-nocca**3*3*lib.num_threads())*.4/max(1,nocca*nmoa)))
     log.debug('max_memory %d MB (%d MB in use)', max_memory, mem_now)
     orbsym = numpy.zeros(nocca, dtype=int)
+    cas_exclude = getattr(eris, 'cas_exclude', None)
     contract = _gen_contract_aaa(t1aT, t2aaT, eris_vooo, eris.focka,
-                                 eris.mo_energy[0], orbsym, log)
+                                 eris.mo_energy[0], orbsym, log,
+                                 cas_exclude=cas_exclude)
     with lib.call_in_background(contract, sync=not mycc.async_io) as ctr:
         for a0, a1 in reversed(list(lib.prange_tril(0, nvira, bufsize))):
             cache_row_a = numpy.asarray(eris_vvop[a0:a1,:a1], order='C')
@@ -93,7 +95,8 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=logger.NOTE):
     log.debug('max_memory %d MB (%d MB in use)', max_memory, mem_now)
     orbsym = numpy.zeros(noccb, dtype=int)
     contract = _gen_contract_aaa(t1bT, t2bbT, eris_VOOO, eris.fockb,
-                                 eris.mo_energy[1], orbsym, log)
+                                 eris.mo_energy[1], orbsym, log,
+                                 cas_exclude=cas_exclude)
     with lib.call_in_background(contract, sync=not mycc.async_io) as ctr:
         for a0, a1 in reversed(list(lib.prange_tril(0, nvirb, bufsize))):
             cache_row_a = numpy.asarray(eris_VVOP[a0:a1,:a1], order='C')
@@ -134,7 +137,8 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=logger.NOTE):
     ts = t1aT, t1bT, t2aaT, t2abT
     fock = (eris.focka, eris.fockb)
     vooo = (eris_vooo, eris_vOoO, eris_VoOo)
-    contract = _gen_contract_baa(ts, vooo, fock, eris.mo_energy, orbsym, log)
+    contract = _gen_contract_baa(ts, vooo, fock, eris.mo_energy, orbsym, log,
+                                 cas_exclude=cas_exclude)
     with lib.call_in_background(contract, sync=not mycc.async_io) as ctr:
         for a0, a1 in lib.prange(0, nvirb, int(bufsize/nvira+1)):
             cache_row_a = numpy.asarray(eris_VvOp[a0:a1,:], order='C')
@@ -154,7 +158,8 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=logger.NOTE):
     fock = (eris.fockb, eris.focka)
     mo_energy = (eris.mo_energy[1], eris.mo_energy[0])
     vooo = (eris_VOOO, eris_VoOo, eris_vOoO)
-    contract = _gen_contract_baa(ts, vooo, fock, mo_energy, orbsym, log)
+    contract = _gen_contract_baa(ts, vooo, fock, mo_energy, orbsym, log,
+                                 cas_exclude=cas_exclude)
     for a0, a1 in lib.prange(0, nvira, int(bufsize/nvirb+1)):
         with lib.call_in_background(contract, sync=not mycc.async_io) as ctr:
             cache_row_a = numpy.asarray(eris_vVoP[a0:a1,:], order='C')
@@ -178,7 +183,7 @@ def kernel(mycc, eris, t1=None, t2=None, verbose=logger.NOTE):
     log.note('UCCSD(T) correction = %.15g', et)
     return et
 
-def _gen_contract_aaa(t1T, t2T, vooo, fock, mo_energy, orbsym, log):
+def _gen_contract_aaa(t1T, t2T, vooo, fock, mo_energy, orbsym, log, cas_exclude=None):
     nvir, nocc = t1T.shape
     mo_energy = numpy.asarray(mo_energy, order='C')
     fvo = fock[nocc:,:nocc].copy()
@@ -204,6 +209,7 @@ def _gen_contract_aaa(t1T, t2T, vooo, fock, mo_energy, orbsym, log):
         drv = _ccsd.libcc.CCuccsd_t_zaaa
     else:
         drv = _ccsd.libcc.CCuccsd_t_aaa
+    ncr, nex = cas_exclude if cas_exclude is not None else (-1, -1)
     def contract(et_sum, a0, a1, b0, b1, cache):
         cache_row_a, cache_col_a, cache_row_b, cache_col_b = cache
         drv(et_sum.ctypes.data_as(ctypes.c_void_p),
@@ -213,6 +219,7 @@ def _gen_contract_aaa(t1T, t2T, vooo, fock, mo_energy, orbsym, log):
             vooo.ctypes.data_as(ctypes.c_void_p),
             fvo.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nocc), ctypes.c_int(nvir),
+            ctypes.c_int(ncr), ctypes.c_int(nex),
             ctypes.c_int(a0), ctypes.c_int(a1),
             ctypes.c_int(b0), ctypes.c_int(b1),
             ctypes.c_int(nirrep),
@@ -227,7 +234,7 @@ def _gen_contract_aaa(t1T, t2T, vooo, fock, mo_energy, orbsym, log):
         cpu2[:] = log.timer_debug1('contract %d:%d,%d:%d'%(a0,a1,b0,b1), *cpu2)
     return contract
 
-def _gen_contract_baa(ts, vooo, fock, mo_energy, orbsym, log):
+def _gen_contract_baa(ts, vooo, fock, mo_energy, orbsym, log, cas_exclude=None):
     t1aT, t1bT, t2aaT, t2abT = ts
     focka, fockb = fock
     vooo, vOoO, VoOo = vooo
@@ -244,6 +251,7 @@ def _gen_contract_baa(ts, vooo, fock, mo_energy, orbsym, log):
         drv = _ccsd.libcc.CCuccsd_t_zbaa
     else:
         drv = _ccsd.libcc.CCuccsd_t_baa
+    ncr, nex = cas_exclude if cas_exclude is not None else (-1, -1)
     def contract(et_sum, a0, a1, b0, b1, cache):
         cache_row_a, cache_col_a, cache_row_b, cache_col_b = cache
         drv(et_sum.ctypes.data_as(ctypes.c_void_p),
@@ -260,6 +268,7 @@ def _gen_contract_baa(ts, vooo, fock, mo_energy, orbsym, log):
             fVO.ctypes.data_as(ctypes.c_void_p),
             ctypes.c_int(nocca), ctypes.c_int(noccb),
             ctypes.c_int(nvira), ctypes.c_int(nvirb),
+            ctypes.c_int(ncr), ctypes.c_int(nex),
             ctypes.c_int(a0), ctypes.c_int(a1),
             ctypes.c_int(b0), ctypes.c_int(b1),
             cache_row_a.ctypes.data_as(ctypes.c_void_p),

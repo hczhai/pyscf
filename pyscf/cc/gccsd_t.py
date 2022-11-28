@@ -63,6 +63,10 @@ def kernel(cc, eris, t1=None, t2=None, verbose=logger.INFO):
                 w = wabc + wcab - wbac
                 v = vabc + vcab - vbac
                 w /= eijk - eabc[a,b,c]
+                if hasattr(eris, 'cas_exclude'):
+                    ncr, nex = eris.cas_exclude
+                    if a < nvir - nex and b < nvir - nex and c < nvir - nex:
+                        w[ncr:, ncr:, ncr:] = 0
                 et += numpy.einsum('ijk,ijk', w, v.conj())
     et /= 2
     return et

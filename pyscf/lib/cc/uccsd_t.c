@@ -29,9 +29,6 @@ typedef struct {
         short _padding;
 } CacheJob;
 
-double _ccsd_t_get_energy(double *w, double *v, double *mo_energy, int nocc,
-                          int a, int b, int c, double fac);
-
 size_t _ccsd_t_gen_jobs(CacheJob *jobs, int nocc, int nvir,
                         int a0, int a1, int b0, int b1,
                         void *cache_row_a, void *cache_col_a,
@@ -39,9 +36,40 @@ size_t _ccsd_t_gen_jobs(CacheJob *jobs, int nocc, int nvir,
 
 void _make_permute_indices(int *idx, int n);
 
-double _ccsd_t_zget_energy(double complex *w, double complex *v,
-                           double *mo_energy, int nocc,
-                           int a, int b, int c, double fac);
+double _ccsd_t_get_energy_rev(double *w, double *v, double *mo_energy, int nocc, int nvir,
+                              int ncr, int nex, int a, int b, int c, double fac)
+{
+        int i, j, k, n;
+        double abc = mo_energy[nocc+a] + mo_energy[nocc+b] + mo_energy[nocc+c];
+        double et = 0;
+        int in_cas = ncr != -1 && nex != -1 && a < nvir - nex && b < nvir - nex && c < nvir - nex;
+
+        for (n = 0, i = 0; i < nocc; i++) {
+        for (j = 0; j < nocc; j++) {
+        for (k = 0; k < nocc; k++, n++) {
+                if (in_cas && i >= ncr && j >= ncr && k >= ncr) continue;
+                et += fac * w[n] * v[n] / (mo_energy[i] + mo_energy[j] + mo_energy[k] - abc);
+        } } }
+        return et;
+}
+
+double _ccsd_t_zget_energy_rev(double complex *w, double complex *v,
+                               double *mo_energy, int nocc, int nvir, int ncr, int nex,
+                               int a, int b, int c, double fac)
+{
+        int i, j, k, n;
+        double abc = mo_energy[nocc+a] + mo_energy[nocc+b] + mo_energy[nocc+c];
+        double et = 0;
+        int in_cas = ncr != -1 && nex != -1 && a < nvir - nex && b < nvir - nex && c < nvir - nex;
+
+        for (n = 0, i = 0; i < nocc; i++) {
+        for (j = 0; j < nocc; j++) {
+        for (k = 0; k < nocc; k++, n++) {
+                if (in_cas && i >= ncr && j >= ncr && k >= ncr) continue;
+                et += fac / (mo_energy[i] + mo_energy[j] + mo_energy[k] - abc) * w[n] * conj(v[n]);
+        } } }
+        return et;
+}
 
 /*
  * w + w.transpose(1,2,0) + w.transpose(2,0,1)
@@ -215,7 +243,7 @@ static void sym_wv(double *w, double *v, double *cache,
         } } }
 }
 
-static double contract6_aaa(int nocc, int nvir, int a, int b, int c,
+static double contract6_aaa(int nocc, int nvir, int ncr, int nex, int a, int b, int c,
                             double *mo_energy, double *t1T, double *t2T,
                             int nirrep, int *o_ir_loc, int *v_ir_loc,
                             int *oo_ir_loc, int *orbsym, double *fvo,
@@ -265,11 +293,11 @@ static double contract6_aaa(int nocc, int nvir, int a, int b, int c,
 
         double et;
         if (a == c) {
-                et = _ccsd_t_get_energy(w0, z0, mo_energy, nocc, a, b, c, 1./6);
+                et = _ccsd_t_get_energy_rev(w0, z0, mo_energy, nocc, nvir, ncr, nex, a, b, c, 1./6);
         } else if (a == b || b == c) {
-                et = _ccsd_t_get_energy(w0, z0, mo_energy, nocc, a, b, c, .5);
+                et = _ccsd_t_get_energy_rev(w0, z0, mo_energy, nocc, nvir, ncr, nex, a, b, c, .5);
         } else {
-                et = _ccsd_t_get_energy(w0, z0, mo_energy, nocc, a, b, c, 1.);
+                et = _ccsd_t_get_energy_rev(w0, z0, mo_energy, nocc, nvir, ncr, nex, a, b, c, 1.);
         }
         return et;
 }
@@ -277,7 +305,8 @@ static double contract6_aaa(int nocc, int nvir, int a, int b, int c,
 void CCuccsd_t_aaa(double complex *e_tot,
                    double *mo_energy, double *t1T, double *t2T,
                    double *vooo, double *fvo,
-                   int nocc, int nvir, int a0, int a1, int b0, int b1,
+                   int nocc, int nvir, int ncr, int nex,
+                   int a0, int a1, int b0, int b1,
                    int nirrep, int *o_ir_loc, int *v_ir_loc,
                    int *oo_ir_loc, int *orbsym,
                    double *cache_row_a, double *cache_col_a,
@@ -299,7 +328,7 @@ void CCuccsd_t_aaa(double complex *e_tot,
         _make_permute_indices(permute_idx, nocc);
 
 #pragma omp parallel default(none) \
-        shared(njobs, nocc, nvir, mo_energy, t1T, t2T, nirrep, o_ir_loc, \
+        shared(njobs, nocc, nvir, ncr, nex, mo_energy, t1T, t2T, nirrep, o_ir_loc, \
                v_ir_loc, oo_ir_loc, orbsym, vooo, fvohalf, jobs, e_tot, \
                permute_idx)
 {
@@ -312,7 +341,7 @@ void CCuccsd_t_aaa(double complex *e_tot,
                 a = jobs[k].a;
                 b = jobs[k].b;
                 c = jobs[k].c;
-                e += contract6_aaa(nocc, nvir, a, b, c, mo_energy, t1T, t2T,
+                e += contract6_aaa(nocc, nvir, ncr, nex, a, b, c, mo_energy, t1T, t2T,
                                    nirrep, o_ir_loc, v_ir_loc, oo_ir_loc, orbsym,
                                    fvohalf, vooo, cache1, jobs[k].cache,
                                    permute_idx);
@@ -440,18 +469,21 @@ static void permute_baa(double *out, double *w, int nocca, int noccb)
         } } }
 }
 
-static double _get_energy_baa(double *z0, double *z1, double *w0, double *w1,
-                              double *mo_ea, double *mo_eb, int nocca, int noccb,
-                              int a, int b, int c, double fac)
+static double _get_energy_baa_rev(double *z0, double *z1, double *w0, double *w1,
+                                  double *mo_ea, double *mo_eb, int nocca, int noccb,
+                                  int nvira, int nvirb, int ncr, int nex,
+                                  int a, int b, int c, double fac)
 {
         int noo = nocca * nocca;
         int i, j, k;
         double abc = mo_eb[noccb+a] + mo_ea[nocca+b] + mo_ea[nocca+c];
         double et = 0;
+        int in_cas = ncr != -1 && nex != -1 && a < nvirb - nex && b < nvira - nex && c < nvira - nex;
 
         for (i = 0; i < noccb; i++) {
         for (j = 0; j < nocca; j++) {
         for (k = 0; k < nocca; k++) {
+                if (in_cas && i >= ncr && j >= ncr && k >= ncr) continue;
                 et += (z0[i*noo+j*nocca+k] + z1[i*noo+k*nocca+j])
                     * (w0[i*noo+j*nocca+k] + w1[i*noo+k*nocca+j])
                     * fac / (mo_eb[i] + mo_ea[j] + mo_ea[k] - abc);
@@ -460,7 +492,7 @@ static double _get_energy_baa(double *z0, double *z1, double *w0, double *w1,
 }
 
 static double contract6_baa(int nocca, int noccb, int nvira, int nvirb,
-                            int a, int b, int c,
+                            int ncr, int nex, int a, int b, int c,
                             double **vs_ts, void **cache, double *cache1)
 {
         int nOoo = noccb * nocca * nocca;
@@ -481,9 +513,9 @@ static double contract6_baa(int nocca, int noccb, int nvira, int nvirb,
         double *mo_eb = vs_ts[1];
         double et;
         if (b == c) {
-                et = _get_energy_baa(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, a, b, c, .5);
+                et = _get_energy_baa_rev(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, nvira, nvirb, ncr, nex, a, b, c, .5);
         } else {
-                et = _get_energy_baa(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, a, b, c, 1.);
+                et = _get_energy_baa_rev(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, nvira, nvirb, ncr, nex, a, b, c, 1.);
         }
         return et;
 }
@@ -529,7 +561,7 @@ void CCuccsd_t_baa(double complex *e_tot,
                    double *vooo, double *vOoO, double *VoOo,
                    double *fvo, double *fVO,
                    int nocca, int noccb, int nvira, int nvirb,
-                   int a0, int a1, int b0, int b1,
+                   int ncr, int nex, int a0, int a1, int b0, int b1,
                    void *cache_row_a, void *cache_col_a,
                    void *cache_row_b, void *cache_col_b)
 {
@@ -544,7 +576,7 @@ void CCuccsd_t_baa(double complex *e_tot,
                 t1aT, t1bT, t2aaT, t2abT};
 
 #pragma omp parallel default(none) \
-        shared(njobs, nocca, noccb, nvira, nvirb, vs_ts, jobs, e_tot)
+        shared(njobs, nocca, noccb, nvira, nvirb, ncr, nex, vs_ts, jobs, e_tot)
 {
         int a, b, c;
         size_t k;
@@ -556,7 +588,7 @@ void CCuccsd_t_baa(double complex *e_tot,
                 a = jobs[k].a;
                 b = jobs[k].b;
                 c = jobs[k].c;
-                e += contract6_baa(nocca, noccb, nvira, nvirb, a, b, c, vs_ts,
+                e += contract6_baa(nocca, noccb, nvira, nvirb, ncr, nex, a, b, c, vs_ts,
                                    jobs[k].cache, cache1);
         }
         free(cache1);
@@ -625,7 +657,7 @@ static void zget_wv(double complex *w, double complex *v, double complex *cache,
 }
 
 static double complex
-zcontract6_aaa(int nocc, int nvir, int a, int b, int c,
+zcontract6_aaa(int nocc, int nvir, int ncr, int nex, int a, int b, int c,
                double *mo_energy, double complex *t1T, double complex *t2T,
                int nirrep, int *o_ir_loc, int *v_ir_loc,
                int *oo_ir_loc, int *orbsym, double complex *fvo,
@@ -660,11 +692,11 @@ zcontract6_aaa(int nocc, int nvir, int a, int b, int c,
 
         double complex et;
         if (a == c) {
-                et = _ccsd_t_zget_energy(w0, z0, mo_energy, nocc, a, b, c, 1./6);
+                et = _ccsd_t_zget_energy_rev(w0, z0, mo_energy, nocc, nvir, ncr, nex, a, b, c, 1./6);
         } else if (a == b || b == c) {
-                et = _ccsd_t_zget_energy(w0, z0, mo_energy, nocc, a, b, c, .5);
+                et = _ccsd_t_zget_energy_rev(w0, z0, mo_energy, nocc, nvir, ncr, nex, a, b, c, .5);
         } else {
-                et = _ccsd_t_zget_energy(w0, z0, mo_energy, nocc, a, b, c, 1.);
+                et = _ccsd_t_zget_energy_rev(w0, z0, mo_energy, nocc, nvir, ncr, nex, a, b, c, 1.);
         }
         return et;
 }
@@ -672,7 +704,8 @@ zcontract6_aaa(int nocc, int nvir, int a, int b, int c,
 void CCuccsd_t_zaaa(double complex *e_tot,
                     double *mo_energy, double complex *t1T, double complex *t2T,
                     double complex *vooo, double complex *fvo,
-                    int nocc, int nvir, int a0, int a1, int b0, int b1,
+                    int nocc, int nvir, int ncr, int nex,
+                    int a0, int a1, int b0, int b1,
                     int nirrep, int *o_ir_loc, int *v_ir_loc,
                     int *oo_ir_loc, int *orbsym,
                     void *cache_row_a, void *cache_col_a,
@@ -695,7 +728,7 @@ void CCuccsd_t_zaaa(double complex *e_tot,
         _make_permute_indices(permute_idx, nocc);
 
 #pragma omp parallel default(none) \
-        shared(njobs, nocc, nvir, mo_energy, t1T, t2T, nirrep, o_ir_loc, \
+        shared(njobs, nocc, nvir, ncr, nex, mo_energy, t1T, t2T, nirrep, o_ir_loc, \
                v_ir_loc, oo_ir_loc, orbsym, vooo, fvohalf, jobs, e_tot, \
                permute_idx)
 {
@@ -709,7 +742,7 @@ void CCuccsd_t_zaaa(double complex *e_tot,
                 a = jobs[k].a;
                 b = jobs[k].b;
                 c = jobs[k].c;
-                e += zcontract6_aaa(nocc, nvir, a, b, c, mo_energy, t1T, t2T,
+                e += zcontract6_aaa(nocc, nvir, ncr, nex, a, b, c, mo_energy, t1T, t2T,
                                     nirrep, o_ir_loc, v_ir_loc, oo_ir_loc, orbsym,
                                     fvohalf, vooo, cache1, jobs[k].cache,
                                     permute_idx);
@@ -825,19 +858,22 @@ static void zpermute_baa(double complex *out, double complex *w, int nocca, int 
 }
 
 static double complex
-_zget_energy_baa(double complex *z0, double complex *z1,
-                 double complex *w0, double complex *w1,
-                 double *mo_ea, double *mo_eb, int nocca, int noccb,
-                 int a, int b, int c, double fac)
+_zget_energy_baa_rev(double complex *z0, double complex *z1,
+                     double complex *w0, double complex *w1,
+                     double *mo_ea, double *mo_eb, int nocca, int noccb,
+                     int nvira, int nvirb, int ncr, int nex,
+                     int a, int b, int c, double fac)
 {
         int noo = nocca * nocca;
         int i, j, k;
         double abc = mo_eb[noccb+a] + mo_ea[nocca+b] + mo_ea[nocca+c];
         double complex et = 0;
+        int in_cas = ncr != -1 && nex != -1 && a < nvirb - nex && b < nvira - nex && c < nvira - nex;
 
         for (i = 0; i < noccb; i++) {
         for (j = 0; j < nocca; j++) {
         for (k = 0; k < nocca; k++) {
+                if (in_cas && i >= ncr && j >= ncr && k >= ncr) continue;
                 et += conj(z0[i*noo+j*nocca+k] + z1[i*noo+k*nocca+j])
                     * (w0[i*noo+j*nocca+k] + w1[i*noo+k*nocca+j])
                     * (fac / (mo_eb[i] + mo_ea[j] + mo_ea[k] - abc));
@@ -847,7 +883,7 @@ _zget_energy_baa(double complex *z0, double complex *z1,
 
 static double complex
 zcontract6_baa(int nocca, int noccb, int nvira, int nvirb,
-               int a, int b, int c,
+               int ncr, int nex, int a, int b, int c,
                double complex **vs_ts, void **cache, double complex *cache1)
 {
         int nOoo = noccb * nocca * nocca;
@@ -868,9 +904,9 @@ zcontract6_baa(int nocca, int noccb, int nvira, int nvirb,
         double *mo_eb = (double *)vs_ts[1];
         double complex et;
         if (b == c) {
-                et = _zget_energy_baa(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, a, b, c, .5);
+                et = _zget_energy_baa_rev(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, nvira, nvirb, ncr, nex, a, b, c, .5);
         } else {
-                et = _zget_energy_baa(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, a, b, c, 1.);
+                et = _zget_energy_baa_rev(z0, z1, w0, w1, mo_ea, mo_eb, nocca, noccb, nvira, nvirb, ncr, nex, a, b, c, 1.);
         }
         return et;
 }
@@ -883,7 +919,7 @@ void CCuccsd_t_zbaa(double complex *e_tot,
                     double complex *vooo, double complex *vOoO, double complex *VoOo,
                     double complex *fvo, double complex *fVO,
                     int nocca, int noccb, int nvira, int nvirb,
-                    int a0, int a1, int b0, int b1,
+                    int ncr, int nex, int a0, int a1, int b0, int b1,
                     void *cache_row_a, void *cache_col_a,
                     void *cache_row_b, void *cache_col_b)
 {
@@ -900,7 +936,7 @@ void CCuccsd_t_zbaa(double complex *e_tot,
                 t1aT, t1bT, t2aaT, t2abT};
 
 #pragma omp parallel default(none) \
-        shared(njobs, nocca, noccb, nvira, nvirb, vs_ts, jobs, e_tot)
+        shared(njobs, nocca, noccb, nvira, nvirb, ncr, nex, vs_ts, jobs, e_tot)
 {
         int a, b, c;
         size_t k;
@@ -913,7 +949,7 @@ void CCuccsd_t_zbaa(double complex *e_tot,
                 a = jobs[k].a;
                 b = jobs[k].b;
                 c = jobs[k].c;
-                e += zcontract6_baa(nocca, noccb, nvira, nvirb, a, b, c, vs_ts,
+                e += zcontract6_baa(nocca, noccb, nvira, nvirb, ncr, nex, a, b, c, vs_ts,
                                    jobs[k].cache, cache1);
         }
         free(cache1);
